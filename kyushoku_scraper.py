@@ -441,11 +441,7 @@ def scrape_tsukuba(year, month):
             else:
                 return base + href
 
-        # デバッグ: 全PDFリンクを表示
         all_pdf_links = soup.find_all("a", href=re.compile(r"\.pdf", re.I))
-        print(f"    [DEBUG] PDF links found: {len(all_pdf_links)}, encoding: {r.encoding}")
-        for a in all_pdf_links[:5]:
-            print(f"      text={repr(a.get_text(strip=True)[:30])}, href={a['href'][:60]}")
 
         # 令和年を含むPDFリンクを優先
         for a in all_pdf_links:
@@ -829,8 +825,8 @@ def main():
         year, month = now.year + 1, 1
     else:
         year, month = now.year, now.month + 1
-    # ↓ 手動で指定する場合はここを変更（テスト用: 3月に固定）
-    year, month = 2026, 3
+    # ↓ 手動で指定する場合はここをコメントアウト解除して変更
+    # year, month = 2026, 4
 
     print(f"\n{'='*50}")
     print(f"給食献立スクレイパー 実行: {year}年{month}月（翌月分）")
