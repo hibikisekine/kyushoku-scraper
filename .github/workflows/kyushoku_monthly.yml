@@ -31,7 +31,7 @@ jobs:
         run: |
           pip install requests beautifulsoup4 pdfplumber
 
-      - name: スクレイパーを実行
+      - name: スクレイパーを実行（5市のCSVを生成）
         run: |
           python kyushoku_scraper.py
 
@@ -42,3 +42,9 @@ jobs:
           git add kyushoku_output/
           git diff --staged --quiet || git commit -m "chore: $(date '+%Y年%m月') 給食献立データ更新"
           git push
+
+      - name: kyushoku.site にアップロード（つくばみらい市）
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          python upload_to_kyushoku.py
