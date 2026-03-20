@@ -814,8 +814,8 @@ def main():
         year, month = now.year + 1, 1
     else:
         year, month = now.year, now.month + 1
-    # ↓ 手動で指定する場合はここを変更
-    # year, month = 2026, 4
+    # ↓ 手動で指定する場合はここを変更（テスト用: 3月に固定）
+    year, month = 2026, 3
 
     print(f"\n{'='*50}")
     print(f"給食献立スクレイパー 実行: {year}年{month}月（翌月分）")
