@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 kyushoku.site 自動アップロードスクリプト
-スクレイパーが生成したつくばみらい市CSVを kyushoku.site にアップロードします。
+スクレイパーが生成した全市CSVを kyushoku.site にアップロードします。
 
 使い方:
   python upload_to_kyushoku.py           # 来月のデータを自動検出
@@ -33,26 +33,57 @@ WEEKDAY_MAP = {
     "日": "日曜日",
 }
 
-# つくばみらい市: センター名 → A/B タイプ
-# A幼稚園・小学校はA中学校とほぼ同一メニューのひらがな版のためスキップ
-CENTER_TYPE_MAP = {
-    "A中学校": "A",
-    "B小学校": "B",
+# 各市のセンター名マッピング:
+#   スクレイパーCSVの center 列の値 → Supabase の type 列に格納する値（cities.ts の center.id と一致させる）
+#   None の場合はスキップ
+CITY_CENTER_MAP = {
+    "つくばみらい市": {
+        "A中学校": "A",
+        "B小学校": "B",
+        "A幼稚園・小学校": None,  # 中学校と同一メニューのため除外
+    },
+    "つくば市": {
+        "すこやか給食センター豊里": "すこやか豊里",
+        "ほがらか給食センター谷田部": "ほがらか谷田部",
+        "桜学校給食センター": "桜",
+        "筑波学校給食センター": "筑波",
+    },
+    "守谷市": {
+        "Aブロック": "Aブロック",
+        "Bブロック": "Bブロック",
+        "Cブロック": "Cブロック",
+    },
+    "取手市": {
+        "小学校（旧取手地区）": "取手",
+    },
+    "龍ケ崎市": {
+        "A献立": "A献立",
+        "B献立": "B献立",
+    },
 }
 
+# 市名 → URLスラッグ（アップロードAPIの city パラメーターに使う正式名称）
+CITY_NAMES = list(CITY_CENTER_MAP.keys())
 
-def convert_tsukubamirai_csv(csv_path: Path, target_type: str) -> str:
+
+def convert_city_csv(csv_path: Path, city_name: str) -> dict[str, str]:
     """
     スクレイパー形式 (city,center,year,month,day,weekday,menus) を
-    アップロード形式 (日付,曜日,献立,タイプ,備考) に変換する
+    アップロード形式 (日付,曜日,献立,タイプ,備考) に変換する。
+    戻り値: { type_id: csv_content } の辞書
     """
-    rows = []
+    center_map = CITY_CENTER_MAP.get(city_name, {})
+    # タイプ別に行を収集
+    rows_by_type: dict[str, list] = {}
+
     with open(csv_path, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             center = row["center"]
-            mapped_type = CENTER_TYPE_MAP.get(center)
-            if mapped_type != target_type:
+            mapped_type = center_map.get(center, center)  # マッピングなければそのまま使用
+
+            # None はスキップ
+            if mapped_type is None:
                 continue
 
             year = int(row["year"])
@@ -62,33 +93,36 @@ def convert_tsukubamirai_csv(csv_path: Path, target_type: str) -> str:
 
             weekday = WEEKDAY_MAP.get(row["weekday"], row["weekday"] + "曜日")
 
-            # 読点（、）区切りを改行区切りに変換（既存Supabaseデータ形式に合わせる）
+            # 読点（、）区切りを改行区切りに変換
             menu = row["menus"].replace("、", "\n")
 
-            rows.append({
+            if mapped_type not in rows_by_type:
+                rows_by_type[mapped_type] = []
+            rows_by_type[mapped_type].append({
                 "日付": date_str,
                 "曜日": weekday,
                 "献立": menu,
-                "タイプ": target_type,
+                "タイプ": mapped_type,
                 "備考": "",
             })
 
-    if not rows:
-        print(f"  ⚠️  {target_type}献立: 対象データが見つかりませんでした")
-        return ""
+    # タイプごとにCSV文字列を生成
+    result = {}
+    for type_id, rows in rows_by_type.items():
+        output = io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=["日付", "曜日", "献立", "タイプ", "備考"],
+            quoting=csv.QUOTE_ALL,
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        result[type_id] = output.getvalue()
 
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=["日付", "曜日", "献立", "タイプ", "備考"],
-        quoting=csv.QUOTE_ALL,
-    )
-    writer.writeheader()
-    writer.writerows(rows)
-    return output.getvalue()
+    return result
 
 
-def upload_csv(csv_content: str, target_type: str, filename: str, password: str) -> bool:
+def upload_csv(csv_content: str, type_id: str, city_name: str, filename: str, password: str) -> bool:
     """変換済みCSVを kyushoku.site/api/upload にPOSTする"""
     if not csv_content:
         return False
@@ -97,19 +131,22 @@ def upload_csv(csv_content: str, target_type: str, filename: str, password: str)
     files = {
         "file": (filename, csv_content.encode("utf-8"), "text/csv;charset=utf-8")
     }
-    data = {"defaultType": target_type}
+    data = {
+        "defaultType": type_id,
+        "city": city_name,
+    }
 
     try:
         resp = requests.post(UPLOAD_URL, headers=headers, files=files, data=data, timeout=30)
         result = resp.json()
         if result.get("success"):
             count = result.get("count", 0)
-            print(f"  ✅ {target_type}献立: {count}件 アップロード成功")
+            print(f"  ✅ {type_id}: {count}件 アップロード成功")
             if result.get("errors"):
                 print(f"     ⚠️  警告 ({len(result['errors'])}件): {result['errors'][:3]}")
             return True
         else:
-            print(f"  ❌ {target_type}献立 失敗: {result.get('message', 'Unknown error')}", file=sys.stderr)
+            print(f"  ❌ {type_id} 失敗: {result.get('message', 'Unknown error')}", file=sys.stderr)
             if resp.status_code == 401:
                 print("     → ADMIN_PASSWORD が正しいか確認してください", file=sys.stderr)
             return False
@@ -121,20 +158,44 @@ def upload_csv(csv_content: str, target_type: str, filename: str, password: str)
         return False
 
 
+def upload_city(city_name: str, year: int, month: int, password: str) -> bool:
+    """指定した市・年月のCSVを読み込んでアップロード。成功した場合 True を返す"""
+    csv_path = OUTPUT_DIR / f"{city_name}_{year}年{month:02d}月.csv"
+    if not csv_path.exists():
+        print(f"  ⚠️  CSVファイルが見つかりません（スキップ）: {csv_path}")
+        return True  # ファイルなしはエラー扱いにしない
+
+    print(f"  📂 {csv_path}")
+    type_csvs = convert_city_csv(csv_path, city_name)
+
+    if not type_csvs:
+        print(f"  ⚠️  変換結果が空です: {city_name}")
+        return True
+
+    all_ok = True
+    for type_id, csv_content in sorted(type_csvs.items()):
+        filename = f"{city_name}_{year}_{month:02d}_{type_id}.csv"
+        ok = upload_csv(csv_content, type_id, city_name, filename, password)
+        if not ok:
+            all_ok = False
+
+    return all_ok
+
+
 def main():
     # 年月の決定（コマンドライン引数 > 自動（来月）の順）
     if len(sys.argv) == 3:
         year, month = int(sys.argv[1]), int(sys.argv[2])
-        print(f"  指定年月: {year}年{month:02d}月")
+        print(f"指定年月: {year}年{month:02d}月")
     else:
         now = datetime.now()
         if now.month == 12:
             year, month = now.year + 1, 1
         else:
             year, month = now.year, now.month + 1
-        print(f"  自動検出: 来月 = {year}年{month:02d}月")
+        print(f"自動検出: 来月 = {year}年{month:02d}月")
 
-    print(f"\n=== kyushoku.site アップロード: {year}年{month:02d}月 ===")
+    print(f"\n=== kyushoku.site アップロード: {year}年{month:02d}月 ===\n")
 
     # 環境変数からパスワードを取得
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
@@ -143,26 +204,18 @@ def main():
         print("  GitHub repo の Settings > Secrets に ADMIN_PASSWORD を追加してください", file=sys.stderr)
         sys.exit(1)
 
-    # CSVファイルの存在確認
-    csv_path = OUTPUT_DIR / f"つくばみらい市_{year}年{month:02d}月.csv"
-    if not csv_path.exists():
-        print(f"  ❌ CSVファイルが見つかりません: {csv_path}", file=sys.stderr)
-        sys.exit(1)
+    all_ok = True
+    for city_name in CITY_NAMES:
+        print(f"【{city_name}】")
+        ok = upload_city(city_name, year, month, admin_password)
+        if not ok:
+            all_ok = False
+        print()
 
-    print(f"  📂 読み込み: {csv_path}")
-
-    # A献立（A中学校）をアップロード
-    csv_a = convert_tsukubamirai_csv(csv_path, "A")
-    ok_a = upload_csv(csv_a, "A", f"tsukubamirai_{year}_{month:02d}_A.csv", admin_password)
-
-    # B献立（B小学校）をアップロード
-    csv_b = convert_tsukubamirai_csv(csv_path, "B")
-    ok_b = upload_csv(csv_b, "B", f"tsukubamirai_{year}_{month:02d}_B.csv", admin_password)
-
-    if ok_a and ok_b:
-        print("\n✅ 完了！")
+    if all_ok:
+        print("✅ 全市アップロード完了！")
     else:
-        print("\n⚠️  一部アップロードに失敗しました", file=sys.stderr)
+        print("⚠️  一部アップロードに失敗しました", file=sys.stderr)
         sys.exit(1)
 
 
