@@ -424,6 +424,7 @@ def scrape_tsukuba(year, month):
         print(f"  つくば市 [{center_name}]")
         try:
             r = requests.get(page_url, headers=HEADERS, timeout=30)
+            r.encoding = r.apparent_encoding  # 文字化け防止
             soup = BeautifulSoup(r.text, "html.parser")
         except Exception as e:
             print(f"    [ERROR] ページ取得失敗: {e}")
@@ -432,20 +433,34 @@ def scrape_tsukuba(year, month):
         target_text = f"{month}月"
         pdf_url = None
 
+        def resolve_url(href, base="https://www.city.tsukuba.lg.jp"):
+            if href.startswith("http"):
+                return href
+            elif href.startswith("//"):
+                return "https:" + href
+            else:
+                return base + href
+
+        # デバッグ: 全PDFリンクを表示
+        all_pdf_links = soup.find_all("a", href=re.compile(r"\.pdf", re.I))
+        print(f"    [DEBUG] PDF links found: {len(all_pdf_links)}, encoding: {r.encoding}")
+        for a in all_pdf_links[:5]:
+            print(f"      text={repr(a.get_text(strip=True)[:30])}, href={a['href'][:60]}")
+
         # 令和年を含むPDFリンクを優先
-        for a in soup.find_all("a", href=re.compile(r"\.pdf$", re.I)):
+        for a in all_pdf_links:
             text = a.get_text(strip=True)
             href = a["href"]
             if target_text in text and str(reiwa_year) in href:
-                pdf_url = href if href.startswith("http") else "https://www.city.tsukuba.lg.jp" + href
+                pdf_url = resolve_url(href)
                 break
 
         # フォールバック: 月名のみで検索
         if not pdf_url:
-            for a in soup.find_all("a", href=re.compile(r"\.pdf$", re.I)):
+            for a in all_pdf_links:
                 href = a["href"]
                 if target_text in a.get_text(strip=True):
-                    pdf_url = href if href.startswith("http") else "https://www.city.tsukuba.lg.jp" + href
+                    pdf_url = resolve_url(href)
                     break
 
         if not pdf_url:
@@ -814,8 +829,8 @@ def main():
         year, month = now.year + 1, 1
     else:
         year, month = now.year, now.month + 1
-    # ↓ 手動で指定する場合はここを変更（テスト用: 3月に固定）
-    year, month = 2026, 3
+    # ↓ 手動で指定する場合はここを変更（テスト用: 4月に固定）
+    year, month = 2026, 4
 
     print(f"\n{'='*50}")
     print(f"給食献立スクレイパー 実行: {year}年{month}月（翌月分）")
