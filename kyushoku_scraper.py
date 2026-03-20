@@ -13,6 +13,7 @@ import requests
 import re
 import csv
 import os
+from urllib.parse import urljoin
 import time
 import calendar
 import datetime as dt
@@ -502,10 +503,10 @@ def scrape_moriya(year, month):
         target = f"{block}ブロック {month}月の献立"
         pdf_url = None
 
-        for a in soup.find_all("a", href=re.compile(r"\.pdf$", re.I)):
+        for a in soup.find_all("a", href=re.compile(r"\.pdf", re.I)):
             if target in a.get_text(strip=True):
                 href = a["href"]
-                pdf_url = href if href.startswith("http") else base + href
+                pdf_url = urljoin(MORIYA_PAGE, href)
                 break
 
         if not pdf_url:
@@ -764,18 +765,18 @@ def find_tsukubamirai_pdfs(soup, base_url, year, month):
     center_pdfs = {}
 
     for center_name, keywords in TSUKUBAMIRAI_CENTERS:
-        # 当月 + センターキーワードの完全一致
+        # リンクテキストで直接マッチ（最優先）
         for link in pdf_links:
-            is_target_month = any(kw in link["context"] for kw in month_keywords)
-            has_center_kw = any(kw in link["context"] for kw in keywords)
+            is_target_month = any(kw in link["text"] for kw in month_keywords)
+            has_center_kw = any(kw in link["text"] for kw in keywords)
             if is_target_month and has_center_kw and center_name not in center_pdfs:
                 center_pdfs[center_name] = link["url"]
                 break
 
-        # フォールバック: センターキーワードのみ
+        # フォールバック: リンクテキストのセンターキーワードのみ
         if center_name not in center_pdfs:
             for link in pdf_links:
-                if any(kw in link["context"] for kw in keywords):
+                if any(kw in link["text"] for kw in keywords):
                     center_pdfs[center_name] = link["url"]
                     break
 
