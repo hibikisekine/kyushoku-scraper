@@ -226,7 +226,7 @@ def parse_toride_pdf(pdf_bytes, city, center, year, month):
                     if not text:
                         continue
 
-                    if 32 <= x <= 45 and re.match(r"^\d{1,2}$", text):
+                    if 28 <= x <= 45 and re.match(r"^\d{1,2}$", text):
                         day_markers.append({"day": int(text), "y": y})
                     elif 43 <= x <= 60 and re.match(r"^[月火水木金土日]$", text):
                         wday_lookup[y] = text
