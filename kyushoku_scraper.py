@@ -424,8 +424,7 @@ def scrape_tsukuba(year, month):
         print(f"  つくば市 [{center_name}]")
         try:
             r = requests.get(page_url, headers=HEADERS, timeout=30)
-            r.encoding = r.apparent_encoding  # 文字化け防止
-            soup = BeautifulSoup(r.text, "html.parser")
+            soup = BeautifulSoup(r.content, "html.parser")
         except Exception as e:
             print(f"    [ERROR] ページ取得失敗: {e}")
             continue
@@ -490,7 +489,7 @@ def scrape_moriya(year, month):
     """守谷市: A/B/Cブロック別PDFを取得"""
     try:
         r = requests.get(MORIYA_PAGE, headers=HEADERS, timeout=30)
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.content, "html.parser")
     except Exception as e:
         print(f"  [ERROR] 守谷市ページ取得失敗: {e}")
         return
@@ -542,7 +541,7 @@ def scrape_toride(year, month):
 
     try:
         r = requests.get(TORIDE_PAGE, headers=HEADERS, timeout=30)
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.content, "html.parser")
     except Exception as e:
         print(f"  [ERROR] 取手市ページ取得失敗: {e}")
         return
@@ -670,7 +669,7 @@ def scrape_ryugasaki(year, month):
     try:
         r = requests.get(index_url, headers=HEADERS, timeout=30)
         if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
+            soup = BeautifulSoup(r.content, "html.parser")
             pattern = re.compile(
                 rf"/kyoiku/kyusyoku/{year}{month:02d}/\d{{8}}\.html"
             )
@@ -703,7 +702,7 @@ def scrape_ryugasaki(year, month):
             r = requests.get(day_url, headers=HEADERS, timeout=15)
             if r.status_code == 404:
                 continue
-            day_rows = parse_ryugasaki_day(r.text, y, m, d)
+            day_rows = parse_ryugasaki_day(r.content.decode(r.apparent_encoding or "utf-8", errors="replace"), y, m, d)
             rows.extend(day_rows)
             time.sleep(0.5)
         except Exception as e:
@@ -789,7 +788,7 @@ def scrape_tsukubamirai(year, month):
 
     try:
         r = requests.get(TSUKUBAMIRAI_PAGE, headers=HEADERS, timeout=30)
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.content, "html.parser")
     except Exception as e:
         print(f"  [ERROR] つくばみらい市ページ取得失敗: {e}")
         return
@@ -829,8 +828,8 @@ def main():
         year, month = now.year + 1, 1
     else:
         year, month = now.year, now.month + 1
-    # ↓ 手動で指定する場合はここを変更（テスト用: 4月に固定）
-    year, month = 2026, 4
+    # ↓ 手動で指定する場合はここを変更（テスト用: 3月に固定）
+    year, month = 2026, 3
 
     print(f"\n{'='*50}")
     print(f"給食献立スクレイパー 実行: {year}年{month}月（翌月分）")
