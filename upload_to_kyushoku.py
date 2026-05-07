@@ -66,6 +66,22 @@ CITY_CENTER_MAP = {
 CITY_NAMES = list(CITY_CENTER_MAP.keys())
 
 
+def _strip_school_names(items: list) -> list:
+    """
+    龍ケ崎市のメニュー先頭にある学校名を除去する。
+    「〇〇小」「〇〇中」「〇〇幼」で終わるアイテムを先頭からスキップする。
+    """
+    school_suffixes = ("小", "中", "幼")
+    i = 0
+    while i < len(items):
+        item = items[i].strip()
+        if any(item.endswith(s) for s in school_suffixes):
+            i += 1
+        else:
+            break
+    return items[i:]
+
+
 def convert_city_csv(csv_path: Path, city_name: str) -> dict[str, str]:
     """
     スクレイパー形式 (city,center,year,month,day,weekday,menus) を
@@ -94,7 +110,13 @@ def convert_city_csv(csv_path: Path, city_name: str) -> dict[str, str]:
             weekday = WEEKDAY_MAP.get(row["weekday"], row["weekday"] + "曜日")
 
             # 読点（、）区切りを改行区切りに変換
-            menu = row["menus"].replace("、", "\n")
+            menu_items = row["menus"].split("、")
+
+            # 龍ケ崎市はメニュー先頭に学校名が含まれるため除去
+            if city_name == "龍ケ崎市":
+                menu_items = _strip_school_names(menu_items)
+
+            menu = "\n".join(item.strip() for item in menu_items if item.strip())
 
             if mapped_type not in rows_by_type:
                 rows_by_type[mapped_type] = []

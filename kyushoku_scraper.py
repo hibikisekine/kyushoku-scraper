@@ -193,13 +193,19 @@ def parse_moriya_pdf(pdf_bytes, city, center, year, month):
 
 def parse_toride_pdf(pdf_bytes, city, center, year, month):
     """
-    取手市PDF: 座標ベースで献立を抽出（テキストPDFのみ）
-    Day at x≈32-45, weekday at x≈43-60, dish names at x≈55-175
+    取手市PDF: 座標+フォント高で献立を抽出（テキストPDFのみ）
+
+    新レイアウト（2026年5月〜）:
+      - 日付: x≈12-15
+      - 曜日: x≈27
+      - 献立: x≈35-150
+      - ふりがな: 高さ≈3px（本文≈5-7px）→ 高さでフィルタ
     """
     results = []
+    weekday_map = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
+
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            # テキスト量チェック（画像PDFは除外）
             total_chars = sum(len(page.chars) for page in pdf.pages)
             if total_chars < 100:
                 print(f"    [SKIP] 画像PDFのため解析スキップ（文字数: {total_chars}）")
@@ -207,70 +213,100 @@ def parse_toride_pdf(pdf_bytes, city, center, year, month):
 
             for page in pdf.pages:
                 words = page.extract_words(
-                    keep_blank_chars=False,
-                    x_tolerance=2,
-                    y_tolerance=2,
+                    keep_blank_chars=False, x_tolerance=2, y_tolerance=2,
                 )
                 if not words:
                     continue
 
-                day_markers = []
-                wday_lookup = {}
-                menu_items = []
+                day_markers = []   # [(y, day)]
+                wday_lookup = {}   # y → 曜日
+                menu_words = []    # [(y, x, text)]
 
                 for w in words:
                     x = w["x0"]
-                    text = w["text"].strip()
                     y = w["top"]
-
+                    text = w["text"].strip()
+                    height = w["bottom"] - w["top"]
                     if not text:
                         continue
+                    # ふりがな（小さい文字）は除外
+                    if height < 4.0:
+                        continue
 
-                    if 28 <= x <= 45 and re.match(r"^\d{1,2}$", text):
-                        day_markers.append({"day": int(text), "y": y})
-                    elif 43 <= x <= 60 and re.match(r"^[月火水木金土日]$", text):
+                    # 日付（x≈10-20）
+                    if 10 <= x <= 20 and re.match(r"^\d{1,2}$", text):
+                        day_markers.append((y, int(text)))
+                    # 曜日（x≈25-35）
+                    elif 25 <= x <= 35 and re.match(r"^[月火水木金土日]$", text):
                         wday_lookup[y] = text
-                    elif 55 <= x <= 175 and text and text not in {"牛乳"}:
-                        # スペース区切り断片を除外（ふりがな等）
-                        if " " not in text and not re.match(r"^([ぁ-ん]\s?){2,}$", text):
-                            # ひらがなのみ短文字列を除外
-                            if not (re.match(r"^[ぁ-ん]+$", text) and len(text) <= 5):
-                                menu_items.append({"text": text, "y": y})
+                    # 献立（x≈35-150）
+                    elif 35 <= x <= 150:
+                        if re.match(r"^[\d\.\s]+$", text):
+                            continue
+                        menu_words.append((y, x, text))
 
                 if not day_markers:
                     continue
+                day_markers.sort()
 
-                day_markers.sort(key=lambda d: d["y"])
+                for i, (dm_y, dm_day) in enumerate(day_markers):
+                    next_y = day_markers[i+1][0] if i+1 < len(day_markers) else float("inf")
 
-                for i, dm in enumerate(day_markers):
-                    next_dm = day_markers[i + 1] if i + 1 < len(day_markers) else None
-                    min_y = dm["y"]
-                    max_y = next_dm["y"] if next_dm else float("inf")
-
+                    # 曜日：日付と同じ y±3 の範囲で探す
                     wday = ""
-                    for y, wd in sorted(wday_lookup.items()):
-                        if min_y <= y < max_y:
+                    for wy, wd in wday_lookup.items():
+                        if dm_y - 3 <= wy <= dm_y + 3:
                             wday = wd
                             break
+                    if not wday:
+                        try:
+                            wday = weekday_map[dt.date(year, month, dm_day).weekday()]
+                        except ValueError:
+                            wday = ""
 
-                    day_menus = [mi["text"] for mi in menu_items if min_y <= mi["y"] < max_y]
+                    # この日のメニューワードを抽出（次の日の手前まで）
+                    day_words = [
+                        (my, mx, mt) for (my, mx, mt) in menu_words
+                        if dm_y - 3 <= my < next_y - 3
+                    ]
 
-                    # 重複除去しつつ順序保持
+                    # y座標でグループ化（±2px）
+                    rows_by_y = {}
+                    for (my, mx, mt) in day_words:
+                        matched_key = None
+                        for ky in rows_by_y:
+                            if abs(ky - my) <= 2:
+                                matched_key = ky
+                                break
+                        if matched_key is None:
+                            matched_key = my
+                            rows_by_y[matched_key] = []
+                        rows_by_y[matched_key].append((mx, mt))
+
+                    dishes = []
+                    for ky in sorted(rows_by_y.keys()):
+                        row = sorted(rows_by_y[ky])
+                        dish = "".join(t for (_x, t) in row).strip()
+                        if not dish:
+                            continue
+                        # 短いひらがなのみのノイズを除外
+                        if re.match(r"^[ぁ-ん]+$", dish) and len(dish) <= 2:
+                            continue
+                        dishes.append(dish)
+
+                    if not dishes:
+                        continue
+
+                    # 重複除去（順序保持）
                     seen = set()
-                    unique_menus = []
-                    for m in day_menus:
-                        if m not in seen:
-                            seen.add(m)
-                            unique_menus.append(m)
+                    unique = [d for d in dishes if not (d in seen or seen.add(d))]
 
-                    if unique_menus:
-                        results.append({
-                            "city": city, "center": center,
-                            "year": year, "month": month,
-                            "day": dm["day"],
-                            "weekday": wday,
-                            "menus": "、".join(unique_menus),
-                        })
+                    results.append({
+                        "city": city, "center": center,
+                        "year": year, "month": month,
+                        "day": dm_day, "weekday": wday,
+                        "menus": "、".join(unique),
+                    })
     except Exception as e:
         print(f"  [WARN] PDF解析エラー: {e}")
     return results
@@ -349,9 +385,16 @@ def parse_tsukubamirai_pdf(pdf_bytes, city, center, year, month):
                 day_markers.sort(key=lambda d: d["y"])
 
                 for i, dm in enumerate(day_markers):
+                    prev_dm = day_markers[i - 1] if i > 0 else None
                     next_dm = day_markers[i + 1] if i + 1 < len(day_markers) else None
 
-                    # midpoint を境界として使う（前日のメニュー混入を防ぐ）
+                    # 上側境界: 前日マーカーとの中間点（最初の日はページ先頭）
+                    if prev_dm:
+                        lower_y = (prev_dm["y"] + dm["y"]) / 2
+                    else:
+                        lower_y = 0
+
+                    # 下側境界: 次日マーカーとの中間点
                     if next_dm:
                         mid_y = (dm["y"] + next_dm["y"]) / 2
                     else:
@@ -364,10 +407,10 @@ def parse_tsukubamirai_pdf(pdf_bytes, city, center, year, month):
                             wday = wd
                             break
 
-                    # この日のメニュー
+                    # この日のメニュー（日付マーカー前後を含む中間点範囲で取得）
                     day_menus = [
                         mi["text"] for mi in menu_items
-                        if dm["y"] - 10 <= mi["y"] < mid_y
+                        if lower_y <= mi["y"] < mid_y
                     ]
 
                     if day_menus and dm["day"] not in all_day_data:
@@ -397,6 +440,53 @@ def parse_tsukubamirai_pdf(pdf_bytes, city, center, year, month):
 
     except Exception as e:
         print(f"  [WARN] PDF解析エラー: {e}")
+
+    # ────────────────────────────────────────────────────────────────
+    # 後処理: 学事暦形式PDFの日付ずれ補正
+    # つくばみらい市PDFは月の初日の曜日によらず「第1日目=月曜」として
+    # 日付を並べるため、月が水曜始まりの場合などに土日に誤ってデータが
+    # 割り当てられる。該当エントリを次の未割り当て平日に再マッピングする。
+    # ────────────────────────────────────────────────────────────────
+    from datetime import date as _date, timedelta as _timedelta
+    _WDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
+
+    def _fix_weekend_shift(entries, yr, mo):
+        weekday_entries = []
+        weekend_entries = []
+        for r in entries:
+            try:
+                d = _date(yr, mo, r["day"])
+            except ValueError:
+                continue
+            (weekday_entries if d.weekday() < 5 else weekend_entries).append(r)
+
+        assigned = {r["day"] for r in weekday_entries}
+
+        for r in sorted(weekend_entries, key=lambda r: r["day"]):
+            d = _date(yr, mo, r["day"])
+            nd = d + _timedelta(days=1)
+            while nd.month == mo and (nd.weekday() >= 5 or nd.day in assigned):
+                nd += _timedelta(days=1)
+            if nd.month == mo:
+                r["day"] = nd.day
+                r["weekday"] = _WDAY_NAMES[nd.weekday()]
+                assigned.add(nd.day)
+                weekday_entries.append(r)
+            else:
+                print(f"  [WARN] 月をまたぐため再割り当て不可: 元{d} → スキップ")
+
+        return sorted(weekday_entries, key=lambda r: r["day"])
+
+    results = _fix_weekend_shift(results, year, month)
+
+    # 曜日フィールドを実際のカレンダーに基づいて補正（PDFの学事曜日表記を上書き）
+    for r in results:
+        try:
+            actual_wd = _WDAY_NAMES[_date(year, month, r["day"]).weekday()]
+            r["weekday"] = actual_wd
+        except ValueError:
+            pass
+
     return results
 
 
@@ -527,8 +617,10 @@ def scrape_moriya(year, month):
 TORIDE_PAGE = "https://www.city.toride.ibaraki.jp/hoken-k/kurashi/kosodate/gakko/gakkokyusyoku/kyusyoku-kondate.html"
 
 # 注意: 中学校・藤代センターは画像PDFのため除外
+# 各ターゲットは (表示名, 必須キーワード, 除外キーワード) のタプル
+# テキスト判定で柔軟にPDFを探す（URLのファイル名規則が時々変わるため）
 TORIDE_TARGETS = [
-    ("小学校（旧取手地区）", "shogakko"),
+    ("小学校（旧取手地区）", ["小学校", "旧・取手市地区"], ["中学校", "幼稚園"]),
 ]
 
 
@@ -546,16 +638,31 @@ def scrape_toride(year, month):
     base = "https://www.city.toride.ibaraki.jp"
     all_rows = []
 
-    for school_name, key in TORIDE_TARGETS:
+    # 月の表記揺れに対応（5月 / 05月）
+    month_patterns = [f"{month}月", f"{month:02d}月"]
+    target_year_text = f"令和{reiwa_year}年"
+
+    for school_name, must_words, must_not_words in TORIDE_TARGETS:
         print(f"  取手市 [{school_name}]")
-        target_text = f"令和{reiwa_year}年{month}月分"
         pdf_url = None
 
-        for a in soup.find_all("a", href=re.compile(rf"{key}.*\.pdf$", re.I)):
-            if target_text in a.get_text(strip=True):
-                href = a["href"]
-                pdf_url = href if href.startswith("http") else base + href
-                break
+        for a in soup.find_all("a", href=re.compile(r"\.pdf$", re.I)):
+            text = a.get_text(strip=True)
+            # 年・月のチェック
+            if target_year_text not in text:
+                continue
+            if not any(mp in text for mp in month_patterns):
+                continue
+            # 必須キーワードのチェック
+            if not all(w in text for w in must_words):
+                continue
+            # 除外キーワードのチェック
+            if any(w in text for w in must_not_words):
+                continue
+
+            href = a["href"]
+            pdf_url = href if href.startswith("http") else base + href
+            break
 
         if not pdf_url:
             print(f"    [SKIP] PDF見つからず")
@@ -655,55 +762,165 @@ def parse_ryugasaki_day(html_text, year, month, day):
     return result
 
 
+# 龍ケ崎市の祝日／除外用語
+RYUGASAKI_HOLIDAYS = {
+    "みどりの日", "こどもの日", "振替休日", "海の日", "山の日",
+    "敬老の日", "文化の日", "勤労感謝の日", "天皇誕生日",
+    "建国記念の日", "春分の日", "秋分の日", "成人の日", "元日",
+    "創立記念日", "開校記念日",
+}
+
+
+def _ryugasaki_clean_items(raw_items):
+    """献立リストをクリーンアップ（★/括弧/祝日/空白分割）"""
+    result = []
+    seen = set()
+    for raw in raw_items:
+        if raw.startswith("★"):
+            continue
+        if raw.startswith("(") or raw.startswith("（"):
+            continue
+        for item in re.split(r"[ 　]+", raw):
+            item = item.strip("、，,")
+            if not item:
+                continue
+            if item in RYUGASAKI_HOLIDAYS:
+                continue
+            if item in seen:
+                continue
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def parse_ryugasaki_pdf(pdf_bytes, year, month, center):
+    """龍ケ崎市の月間献立PDFを解析してrowsを返す"""
+    weekday_map = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
+    days_data = {}
+
+    import io
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        current_day = None
+        for page in pdf.pages:
+            tables = page.extract_tables() or []
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 4:
+                        continue
+                    day_cell = (row[1] or "").strip() if row[1] else ""
+                    menu_cell = (row[3] or "").strip() if row[3] else ""
+
+                    if day_cell.isdigit():
+                        current_day = int(day_cell)
+                        if current_day not in days_data:
+                            days_data[current_day] = []
+
+                    if current_day is None:
+                        continue
+
+                    if menu_cell:
+                        items = [x.strip() for x in re.split(r"\n+", menu_cell) if x.strip()]
+                        for item in items:
+                            if item == "献立名":
+                                continue
+                            days_data[current_day].append(item)
+
+    rows = []
+    for day, raw_menus in sorted(days_data.items()):
+        cleaned = _ryugasaki_clean_items(raw_menus)
+        if not cleaned:
+            continue
+        try:
+            weekday = weekday_map[dt.date(year, month, day).weekday()]
+        except ValueError:
+            weekday = ""
+        rows.append({
+            "city": "龍ケ崎市", "center": center,
+            "year": year, "month": month, "day": day, "weekday": weekday,
+            "menus": "、".join(cleaned),
+        })
+    return rows
+
+
+def _ryugasaki_find_pdf_urls(index_html, year, month):
+    """インデックスHTMLから A献立/B献立 のPDF URLを抽出"""
+    soup = BeautifulSoup(index_html, "html.parser")
+    a_url = None
+    b_url = None
+    # KON{年下2桁 or 1桁の令和年}-{月}-{A or B}.pdf 形式を想定
+    pdf_pattern = re.compile(r"KON\d+-\d+-([AB])\.pdf$", re.IGNORECASE)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = pdf_pattern.search(href)
+        if not m:
+            continue
+        url = href if href.startswith("http") else (RYUGASAKI_BASE + ("/" if not href.startswith("/") else "") + href.lstrip("/")) if href.startswith("/") else f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{href}"
+        # 相対パス処理
+        if not href.startswith("http"):
+            if href.startswith("/"):
+                url = RYUGASAKI_BASE + href
+            else:
+                url = f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{href}"
+        kind = m.group(1).upper()
+        if kind == "A" and not a_url:
+            a_url = url
+        elif kind == "B" and not b_url:
+            b_url = url
+    return a_url, b_url
+
+
 def scrape_ryugasaki(year, month):
-    """龍ケ崎市: 月別インデックス → 日別ページを順にスクレイプ"""
+    """龍ケ崎市: 月間PDFから A献立・B献立 を抽出"""
     print(f"  龍ケ崎市")
 
-    # インデックスページから日別リンクを収集
-    index_url = f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{year}{month:02d}KON.html"
-    day_urls = []
+    # インデックスURLの候補（非パディング優先）
+    index_url_candidates = [
+        f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{year}{month}KON.html",
+        f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{year}{month:02d}KON.html",
+    ]
 
-    try:
-        r = requests.get(index_url, headers=HEADERS, timeout=30)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.content, "html.parser")
-            pattern = re.compile(
-                rf"/kyoiku/kyusyoku/{year}{month:02d}/\d{{8}}\.html"
-            )
-            for a in soup.find_all("a", href=pattern):
-                href = a["href"]
-                url = href if href.startswith("http") else RYUGASAKI_BASE + href
-                if url not in day_urls:
-                    day_urls.append(url)
-    except Exception as e:
-        print(f"    [WARN] インデックスページ取得失敗: {e}")
+    a_pdf_url = None
+    b_pdf_url = None
+    found_index = None
 
-    if not day_urls:
-        # 直接日別URLを試す
-        print(f"    インデックスからリンク取得できず、直接アクセスを試みます")
-        _, days_in_month = calendar.monthrange(year, month)
-        for d in range(1, days_in_month + 1):
-            day_urls.append(
-                f"{RYUGASAKI_BASE}/kyoiku/kyusyoku/{year}{month:02d}/{year}{month:02d}{d:02d}.html"
-            )
+    for index_url in index_url_candidates:
+        try:
+            r = requests.get(index_url, headers=HEADERS, timeout=30)
+            if r.status_code == 200:
+                a_pdf_url, b_pdf_url = _ryugasaki_find_pdf_urls(r.content, year, month)
+                if a_pdf_url or b_pdf_url:
+                    found_index = index_url
+                    break
+        except Exception as e:
+            print(f"    [WARN] インデックスページ取得失敗 ({index_url}): {e}")
+
+    if found_index:
+        print(f"    インデックス: {found_index}")
+    if a_pdf_url:
+        print(f"    A献立PDF: {a_pdf_url}")
+    if b_pdf_url:
+        print(f"    B献立PDF: {b_pdf_url}")
+
+    if not (a_pdf_url or b_pdf_url):
+        print(f"    [ERROR] PDFリンクが見つからない。インデックス構造の確認が必要")
+        return
 
     rows = []
 
-    for day_url in day_urls:
-        dm = re.search(r"(\d{4})(\d{2})(\d{2})\.html", day_url)
-        if not dm:
+    for url, center in [(a_pdf_url, "A献立"), (b_pdf_url, "B献立")]:
+        if not url:
             continue
-        y, m, d = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
-
         try:
-            r = requests.get(day_url, headers=HEADERS, timeout=15)
-            if r.status_code == 404:
+            pdf_bytes = download_pdf(url)
+            if not pdf_bytes:
+                print(f"    [WARN] {center} PDFダウンロード失敗")
                 continue
-            day_rows = parse_ryugasaki_day(r.content.decode(r.apparent_encoding or "utf-8", errors="replace"), y, m, d)
+            day_rows = parse_ryugasaki_pdf(pdf_bytes, year, month, center)
+            print(f"    {center}: {len(day_rows)}日分")
             rows.extend(day_rows)
             time.sleep(0.5)
         except Exception as e:
-            print(f"    [WARN] {day_url}: {e}")
+            print(f"    [WARN] {center} 解析失敗: {e}")
 
     print(f"    抽出: {len(rows)}行")
     save_csv(rows, f"龍ケ崎市_{year}年{month:02d}月.csv")
@@ -819,24 +1036,51 @@ def scrape_tsukubamirai(year, month):
 # ──────────────────────────────────────────
 
 def main():
-    now = datetime.now()
-    # 毎月28日実行 → 翌月分の献立を取得
-    if now.month == 12:
-        year, month = now.year + 1, 1
+    import sys
+
+    # 環境変数 or コマンドライン引数で年月を指定可能
+    # 例: python kyushoku_scraper.py 2026 5
+    # 例: python kyushoku_scraper.py ryugasaki 2026 5  （特定の市だけ）
+    target_city = None
+    args = sys.argv[1:]
+    if args and not args[0].isdigit():
+        target_city = args.pop(0)
+
+    if len(args) >= 2:
+        year, month = int(args[0]), int(args[1])
     else:
-        year, month = now.year, now.month + 1
+        now = datetime.now()
+        # 毎月28日実行 → 翌月分の献立を取得
+        if now.month == 12:
+            year, month = now.year + 1, 1
+        else:
+            year, month = now.year, now.month + 1
     # ↓ 手動で指定する場合はここをコメントアウト解除して変更
     # year, month = 2026, 4
 
     print(f"\n{'='*50}")
-    print(f"給食献立スクレイパー 実行: {year}年{month}月（翌月分）")
+    print(f"給食献立スクレイパー 実行: {year}年{month}月")
+    if target_city:
+        print(f"対象: {target_city} のみ")
     print(f"{'='*50}\n")
 
-    scrape_tsukuba(year, month)
-    scrape_moriya(year, month)
-    scrape_toride(year, month)
-    scrape_ryugasaki(year, month)
-    scrape_tsukubamirai(year, month)
+    runners = {
+        "tsukuba":      lambda: scrape_tsukuba(year, month),
+        "moriya":       lambda: scrape_moriya(year, month),
+        "toride":       lambda: scrape_toride(year, month),
+        "ryugasaki":    lambda: scrape_ryugasaki(year, month),
+        "tsukubamirai": lambda: scrape_tsukubamirai(year, month),
+    }
+
+    if target_city:
+        if target_city not in runners:
+            print(f"[ERROR] 不明な市名: {target_city}")
+            print(f"        指定可能: {', '.join(runners.keys())}")
+            return
+        runners[target_city]()
+    else:
+        for fn in runners.values():
+            fn()
 
     print(f"\n完了! 結果は {OUTPUT_DIR}/ に保存されました。")
 
